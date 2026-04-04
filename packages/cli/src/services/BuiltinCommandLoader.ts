@@ -18,6 +18,7 @@ import { clearCommand } from '../ui/commands/clearCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
+import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
@@ -74,6 +75,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressCommand,
       contextCommand,
       copyCommand,
+      doctorCommand,
       docsCommand,
       directoryCommand,
       editorCommand,
