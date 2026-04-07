@@ -160,16 +160,22 @@ if (offset + lineLength >= endOffset) { ... }
 
 ---
 
-## Bug 10: Async `publish()` called without `await` — unhandled promise rejection
+## Bug 10: `LruCache.get()` fails to reorder when value is falsy
 
-**File:** `packages/core/src/confirmation-bus/message-bus.ts:141`
+**File:** `packages/core/src/utils/LruCache.ts:16-24`
 
 ```typescript
-// Publish the request with correlation ID
-this.publish({ ...request, correlationId } as TRequest);  // NOT awaited
+get(key: K): V | undefined {
+  const value = this.cache.get(key);
+  if (value) {                    // BUG: truthy check, not existence check
+    this.cache.delete(key);
+    this.cache.set(key, value);
+  }
+  return value;
+}
 ```
 
-**Impact:** `publish()` is declared `async` (line 40) and can throw errors, but it is called without `await` inside `request()`. If `publish()` throws (e.g. due to invalid message structure), the rejection is unhandled — it won't be caught by the caller's promise chain, resulting in an `UnhandledPromiseRejection` that could crash the process.
+**Impact:** When a cached value is falsy (`0`, `''`, `false`, `null`), the LRU reordering step is skipped. The value is still returned correctly, but it remains in its original insertion-order position instead of being moved to the most-recently-used end. A legitimate falsy value will therefore be evicted earlier than it should be, breaking the LRU invariant. The correct check is `if (value !== undefined)` or `if (this.cache.has(key))`.
 
 ---
 
@@ -298,56 +304,65 @@ Cleanup only happens in `onPromptEnd` (line 253-264), which is only called when 
 
 ---
 
-## Bug 18: `findBlockBoundary` rejects valid paragraph boundaries at buffer start
+## Bug 18: `SessionRouter.hasSession` / `removeSession` prefix-match collides on similar sender IDs
 
-**File:** `packages/channels/base/src/BlockStreamer.ts:108-110`
-
-```typescript
-private findBlockBoundary(text: string): number {
-  const last = text.lastIndexOf('\n\n');
-  if (last < 0 || last < this.opts.minChars) return -1;
-  return last + 2;
-}
-```
-
-**Impact:** When `minChars` is 0 and a paragraph boundary (`\n\n`) occurs at position 0, `last` is 0. The condition `last < this.opts.minChars` becomes `0 < 0` which is false, so this specific case is handled correctly. However, when `minChars` is any positive value (default: 400), boundaries at positions 1 through `minChars-1` are rejected even if there's sufficient content after the boundary. The check conflates "position of boundary" with "minimum content before boundary," preventing early block emissions even when the total buffer has ample content.
-
----
-
-## Bug 19: Crash recovery registers duplicate `toolCall` listeners on bridge restart
-
-**File:** `packages/cli/src/commands/channel/start.ts:221,383`
+**File:** `packages/channels/base/src/SessionRouter.ts:88-98, 103-125`
 
 ```typescript
-// In the disconnected handler:
-bridge = new AcpBridge(bridgeOpts);
-await bridge.start();
-router.setBridge(bridge);
-channel.setBridge(bridge);
-registerToolCallDispatch(bridge, router, channels);  // Registers NEW listener
-```
-
-But the `disconnected` listener itself (Bug 12) is on the old bridge, and `registerToolCallDispatch` (line 112-126) unconditionally adds a new `toolCall` listener each time it's called. If the first bridge's `disconnected` handler fires and recovery succeeds, the new bridge gets a fresh `toolCall` listener. But if the old bridge still emits events before GC, or if recovery is called multiple times, listeners can accumulate.
-
-**Impact:** Each crash recovery cycle adds a new `toolCall` listener without removing old ones. After multiple crash-recovery cycles, tool call events are dispatched multiple times, potentially sending duplicate tool call notifications to channel adapters.
-
----
-
-## Bug 20: `getPositionFromOffsets` start calculation adds phantom newline to last line
-
-**File:** `packages/cli/src/ui/components/shared/text-buffer.ts:379`
-
-```typescript
-// Start position: always adds +1, even for the last line
-for (let i = 0; i < lines.length; i++) {
-  const lineLength = lines[i].length + 1; // +1 for newline — even on last line!
-  if (offset + lineLength > startOffset) {
-    startRow = i;
-    startCol = startOffset - offset;
-    break;
+hasSession(channelName: string, senderId: string, chatId?: string): boolean {
+  const key = chatId
+    ? this.routingKey(channelName, senderId, chatId)
+    : `${channelName}:${senderId}`;
+  if (chatId) return this.toSession.has(key);
+  for (const k of this.toSession.keys()) {
+    if (k.startsWith(`${channelName}:${senderId}`)) return true;  // BUG
   }
-  offset += lineLength;
+  return false;
 }
 ```
 
-**Impact:** For a single-line document like `"abc"` (length 3), the start calculation treats the line as having length 4 (adding 1 for a non-existent newline). If `startOffset` is 3 (one past the last character), the condition `0 + 4 > 3` is true, yielding `startCol = 3`. This happens to be correct for this case, but for multi-line documents, the accumulated phantom newline on the last line shifts offsets, causing `startCol` to be calculated incorrectly when `startOffset` targets positions at the end of the document.
+Stored keys for the default `'user'` scope have the form `${channelName}:${senderId}:${chatId}` (line 58). The prefix check `k.startsWith('${channelName}:${senderId}')` matches any key whose senderId *starts with* the supplied one, not just exact matches.
+
+**Impact:**
+1. **False positive in `hasSession`:** Calling `hasSession('telegram', 'user1')` returns `true` if only `user12` has a session — the two distinct users collide.
+2. **Cross-user deletion in `removeSession`:** Line 115 uses the same prefix pattern. Calling `removeSession('telegram', 'user1')` will also delete sessions belonging to `user12`, `user100`, etc.
+3. **Fails entirely under `'thread'`/`'single'` scope:** When the channel uses scope `'thread'` (key `${channelName}:${threadId}`) or `'single'` (key `${channelName}:__single__`), the prefix is `${channelName}:${senderId}` which does not appear in the stored keys at all — `hasSession` always returns `false` and `removeSession` never removes anything, even though valid sessions exist.
+
+The correct fix is to append the key separator (`${channelName}:${senderId}:`) and scope the prefix scan to the relevant `SessionScope`.
+
+---
+
+## Bug 19: `Stream.return()` leaves pending `next()` promise unresolved — consumer hangs
+
+**File:** `packages/sdk-typescript/src/utils/Stream.ts:72-78`
+
+```typescript
+return(): Promise<IteratorResult<T>> {
+  this.isDone = true;
+  if (this.returned) {
+    this.returned();
+  }
+  return Promise.resolve({ done: true, value: undefined });
+}
+```
+
+When an async iterator's consumer breaks out of a `for await (...)` loop (or the iterator is otherwise prematurely closed), the runtime calls `return()` on the iterator. However, `return()` here does not touch `readResolve` / `readReject`.
+
+Consider this sequence:
+1. Consumer calls `stream.next()`. Queue is empty, so `readResolve`/`readReject` are assigned and a pending promise is returned.
+2. Consumer decides to bail out and calls `stream.return()` (directly, or via `for-await` `break`).
+3. `return()` sets `isDone = true` and resolves its *own* promise, but the original `next()` promise stored in `readResolve` is never touched.
+
+**Impact:** The pending `next()` promise never resolves or rejects. Any `await`er of that promise hangs forever, potentially holding references that prevent process shutdown. `done()` correctly handles this case (line 54-59); `error()` handles it too (line 64-69); only `return()` forgets, which is exactly the path taken on iterator cleanup.
+
+---
+
+## Re-verification notes
+
+After re-reading each candidate against the source, three previously listed findings were removed:
+
+- **Former Bug 10 (`publish()` not awaited):** Not a real bug. `MessageBus.publish()` has no internal `await`s — its body is synchronous and already wraps everything in `try/catch` that re-emits errors via the `'error'` event (message-bus.ts:40-68). The missing `await` has no observable effect.
+- **Former Bug 18 (`findBlockBoundary` rejects early boundaries):** Not a real bug. The `last < minChars` check is intentional — `minChars` is documented as the minimum block size, and rejecting boundaries whose position is below `minChars` correctly enforces that threshold.
+- **Former Bug 20 (`getPositionFromOffsets` start calculation):** This overlapped with Bug 9, which already describes the asymmetry between the start- and end-position calculations in the same function. Merged into Bug 9 to avoid duplication.
+
+Bug 5 (`findBreakPoint` uses `> 0` instead of `>= 0`) remains listed but note that rejecting position 0 may be deliberate (emitting a zero-length prefix would be pointless). It is listed because nothing in the code or comments documents that choice, and the inconsistency with `findBlockBoundary` (which uses `< 0` correctly) suggests it was unintentional.
