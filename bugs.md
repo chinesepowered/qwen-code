@@ -101,7 +101,7 @@ const effectiveCursorPosition =
 
 ---
 
-## Bug 7: Telegram HTML fallback sends entire message instead of plain-text chunk
+## Bug 7: Telegram HTML fallback sends entire message instead of plain-text chunk (FIXED on main)
 
 **File:** `packages/channels/telegram/src/TelegramAdapter.ts:182-195`
 
@@ -216,7 +216,7 @@ bridge.on('disconnected', async () => {        // line 191/346 — listener on O
 
 ---
 
-## Bug 13: Hook exit code `null` (signal kill) silently reported as `0`
+## Bug 13: Hook exit code `null` (signal kill) silently reported as `0` (FIXED on main)
 
 **File:** `packages/core/src/hooks/hookRunner.ts:434`
 
