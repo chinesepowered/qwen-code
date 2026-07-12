@@ -98,6 +98,13 @@ export function getLanguageFromFilePath(filePath: string): string | undefined {
   if (extension) {
     return extensionToLanguageMap[extension];
   }
+  // No extension: either a dotfile (`.gitignore`, whose basename already starts
+  // with a dot) or an extensionless name (`Dockerfile`). Try the basename as-is
+  // first so dotfiles match their `.gitignore`-style keys, then with a leading
+  // dot so `Dockerfile` matches `.dockerfile`. Prepending unconditionally would
+  // turn `.gitignore` into a `..gitignore` lookup that never matches.
   const filename = path.basename(filePath).toLowerCase();
-  return extensionToLanguageMap[`.${filename}`];
+  return (
+    extensionToLanguageMap[filename] ?? extensionToLanguageMap[`.${filename}`]
+  );
 }
